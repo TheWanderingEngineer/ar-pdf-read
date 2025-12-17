@@ -2,3 +2,5 @@ flask
 mistralai
 reportlab
 gunicorn
+arabic-reshaper
+python-bidi

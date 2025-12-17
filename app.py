@@ -6,10 +6,16 @@ from io import BytesIO
 from flask import Flask, request, jsonify, render_template_string, send_file
 from mistralai import Mistral
 
+# PDF (Arabic)
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 app = Flask(__name__)
 
@@ -154,7 +160,7 @@ HTML = r"""
 <body>
   <div class="wrap">
     <h1>قارئ PDF بالـ OCR</h1>
-    <p class="sub">ارفع ملف PDF ثم اضغط <b>اقرأ</b>. سيتم عرض العناوين اول، وبعدها يمكنك <b>عرض الكل</b> أو التحميل كـ PDF / MD / TXT.</p>
+    <p class="sub">ارفع ملف PDF ثم اضغط <b>اقرأ</b>. سيتم عرض العناوين أولًا، وبعده يمكنك <b>عرض الكل</b> أو التحميل كـ PDF / MD / TXT.</p>
 
     <div class="card">
       <div class="row">
@@ -167,7 +173,7 @@ HTML = r"""
 
       <div id="progressBox" class="progress-wrap hidden" aria-live="polite">
         <div class="progress-top">
-          <span id="progressLabel">جاري القرايه</span>
+          <span id="progressLabel">يلا يلا هذاي اشتغل...</span>
           <span id="progressPct">0%</span>
         </div>
         <div class="bar"><div id="progressFill" class="fill"></div></div>
@@ -187,7 +193,7 @@ HTML = r"""
 
     <div class="card">
       <div class="panel-title">
-        <h3>الناتج</h3>
+        <h3>النتايج</h3>
         <small id="meta"></small>
       </div>
 
@@ -235,10 +241,10 @@ pdf.onchange = () => {
 };
 
 function extractHeadings(md){
-  const lines = md.split(/\r?\n/);
+  const lines = md.split(/\\r?\\n/);
   const heads = [];
   for (const line of lines){
-    const m = line.match(/^(#{1,6})\s+(.*)\s*$/);
+    const m = line.match(/^(#{1,6})\\s+(.*)\\s*$/);
     if (m) heads.push({level: m[1].length, text: m[2]});
   }
   return heads;
@@ -265,7 +271,7 @@ function renderOutline(md){
     }
   }
 
-  const pages = (md.match(/^# Page\s+\d+/gm) || []).length;
+  const pages = (md.match(/^# Page\\s+\\d+/gm) || []).length;
   metaEl.textContent = `${pages || "؟"} صفحة • ${heads.length} عنوان`;
 }
 
@@ -297,16 +303,13 @@ function downloadBlob(filename, mime, content){
 function startProgress(){
   progValue = 0;
   progressBox.classList.remove("hidden");
-  progressLabel.textContent = "يلا يلا هذاي اقرا الملف ثواني...";
+  progressLabel.textContent = "يلا يلا هذاي اقرا…";
   setProgress(0);
 
-  // Fake-but-clean progress (real OCR time is unknown).
-  // Goes to 95% then waits for server response.
+  // Clean fake progress: up to 95%, then waits for server
   progTimer = setInterval(() => {
     const cap = 95;
     if (progValue >= cap) return;
-
-    // Smooth increments: faster early, slower later
     const remaining = cap - progValue;
     const step = Math.max(1, Math.round(remaining * 0.06));
     progValue = Math.min(cap, progValue + step);
@@ -324,7 +327,6 @@ function stopProgress(success=true){
     setTimeout(() => progressBox.classList.add("hidden"), 700);
   } else {
     progressLabel.textContent = "فشل.";
-    // keep visible briefly
     setTimeout(() => progressBox.classList.add("hidden"), 1200);
   }
 }
@@ -356,7 +358,7 @@ readBtn.onclick = async () => {
 
     if (!ct.includes("application/json")) {
       const txt = await r.text();
-      throw new Error("رد غير متوقع من الجماعه:\n" + txt.slice(0, 400));
+      throw new Error("رد غير متوقع من الجماعه كلمني واتس:\\n" + txt.slice(0, 400));
     }
 
     const data = await r.json();
@@ -388,8 +390,8 @@ dlMdBtn.onclick = () => {
 dlTxtBtn.onclick = () => {
   if (!OCR_MD) return;
   const txt = OCR_MD
-    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")          // remove images
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");     // remove links
+    .replace(/!\\[[^\\]]*\\]\\([^\\)]+\\)/g, "")      // remove images
+    .replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, "$1"); // remove links
   downloadBlob("ocr.txt", "text/plain;charset=utf-8", txt);
 };
 
@@ -442,9 +444,16 @@ dlPdfBtn.onclick = async () => {
 </html>
 """
 
+# ---------- Routes ----------
+
 @app.get("/")
 def index():
     return render_template_string(HTML)
+
+@app.get("/favicon.ico")
+def favicon():
+    # avoid noisy 404 logs; you can replace with a real icon later
+    return ("", 204)
 
 @app.post("/ocr")
 def ocr():
@@ -470,7 +479,7 @@ def ocr():
                 "type": "document_url",
                 "document_url": f"data:application/pdf;base64,{b64}",
             },
-            include_image_base64=False,
+            include_image_base64=False,  # IMPORTANT: saves memory/time
         )
 
         pages_md = []
@@ -483,7 +492,26 @@ def ocr():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
+# ---------- PDF generation (Arabic RTL) ----------
+
+_FONT_REGISTERED = False
+
+def _rtl_fix(s: str) -> str:
+    return get_display(arabic_reshaper.reshape(s))
+
+def _ensure_arabic_font():
+    global _FONT_REGISTERED
+    if _FONT_REGISTERED:
+        return
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "Amiri-Regular.ttf")
+    if not os.path.exists(font_path):
+        raise FileNotFoundError(f"Arabic font missing at: {font_path}")
+    pdfmetrics.registerFont(TTFont("Amiri", font_path))
+    _FONT_REGISTERED = True
+
 def md_to_pdf_bytes(markdown: str) -> bytes:
+    _ensure_arabic_font()
+
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf,
@@ -493,14 +521,15 @@ def md_to_pdf_bytes(markdown: str) -> bytes:
     )
 
     styles = getSampleStyleSheet()
-    body = ParagraphStyle("Body", parent=styles["Normal"], fontSize=10, leading=13, spaceAfter=6)
-    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontSize=16, leading=18, spaceAfter=10)
-    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontSize=13, leading=15, spaceAfter=8)
-    h3 = ParagraphStyle("H3", parent=styles["Heading3"], fontSize=11.5, leading=14, spaceAfter=6)
+    body = ParagraphStyle("Body", parent=styles["Normal"], fontName="Amiri", fontSize=12, leading=16, spaceAfter=6)
+    h1   = ParagraphStyle("H1",   parent=styles["Heading1"], fontName="Amiri", fontSize=18, leading=22, spaceAfter=10)
+    h2   = ParagraphStyle("H2",   parent=styles["Heading2"], fontName="Amiri", fontSize=15, leading=19, spaceAfter=8)
+    h3   = ParagraphStyle("H3",   parent=styles["Heading3"], fontName="Amiri", fontSize=13, leading=17, spaceAfter=6)
 
     story = []
 
-    markdown = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", markdown)  # drop images
+    # drop markdown images
+    markdown = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", markdown)
 
     for raw in markdown.splitlines():
         line = raw.strip()
@@ -511,17 +540,13 @@ def md_to_pdf_bytes(markdown: str) -> bytes:
         m = re.match(r"^(#{1,6})\s+(.*)$", line)
         if m:
             level = len(m.group(1))
-            text = m.group(2).strip()
-            text = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-            if level == 1:
-                story.append(Paragraph(text, h1))
-            elif level == 2:
-                story.append(Paragraph(text, h2))
-            else:
-                story.append(Paragraph(text, h3))
+            text = _rtl_fix(m.group(2).strip())
+            text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            story.append(Paragraph(text, h1 if level == 1 else h2 if level == 2 else h3))
             continue
 
-        text = (line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        text = _rtl_fix(line)
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         story.append(Paragraph(text, body))
 
     doc.build(story)
@@ -533,7 +558,7 @@ def pdf():
         data = request.get_json(force=True, silent=False)
         md = (data.get("markdown") or "").strip()
         if not md:
-            return jsonify(error="لا يوجد نص لتحويله إلى PDF"), 400
+            return jsonify(error="ما فيه لتحويله إلى PDF"), 400
 
         pdf_bytes = md_to_pdf_bytes(md)
         return send_file(
