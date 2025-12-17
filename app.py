@@ -160,7 +160,7 @@ HTML = r"""
 <body>
   <div class="wrap">
     <h1>قارئ PDF بالـ OCR</h1>
-    <p class="sub">ارفع ملف PDF ثم اضغط <b>اقرأ</b>. سيتم عرض العناوين أولًا، وبعده يمكنك <b>عرض الكل</b> أو التحميل كـ PDF / MD / TXT.</p>
+    <p class="sub">ارفع ملف PDF ثم اضغط <b>اقرأ</b>. سيتم عرض العناوين أول، وبعده يمكنك <b>عرض الكل</b> أو التحميل كـ PDF / MD / TXT.</p>
 
     <div class="card">
       <div class="row">
