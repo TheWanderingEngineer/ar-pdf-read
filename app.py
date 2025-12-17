@@ -470,7 +470,7 @@ def ocr():
                 "type": "document_url",
                 "document_url": f"data:application/pdf;base64,{b64}",
             },
-            include_image_base64=True,
+            include_image_base64=False,
         )
 
         pages_md = []
